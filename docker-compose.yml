@@ -1,0 +1,19 @@
+# Minideck management server.
+#   1. set MINIDECK_PUBLIC to the address client PCs will use (DNS name or IP)
+#   2. docker compose up -d
+#   3. docker compose logs   -> first admin password and enrollment code
+services:
+  minideck-server:
+    build: .
+    image: minideck-server
+    container_name: minideck-server
+    restart: unless-stopped
+    ports:
+      - "7072:7072"
+    environment:
+      MINIDECK_PUBLIC: "server.example.com"
+    volumes:
+      - minideck-data:/data
+
+volumes:
+  minideck-data:

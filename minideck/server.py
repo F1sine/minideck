@@ -30,6 +30,7 @@ from .journal import REPORTED
 from .relay import _pipe
 
 ROLES = ("admin", "operator", "viewer")
+PASSWORD_FILE = "ADMIN-PASSWORD.txt"   # first/reset admin password; removed once it is changed
 ID_RE = re.compile(r"\d{9}")
 NAME_RE = re.compile(r"[A-Za-z0-9_.-]{2,32}")
 MAX_FAILS, FAIL_WINDOW = 5, 60.0
@@ -174,8 +175,9 @@ class Ticket:
 
 
 class Server:
-    def __init__(self, store, fingerprint, log=print):
+    def __init__(self, store, fingerprint, log=print, data_dir=None):
         self.store = store
+        self.password_file = Path(data_dir) / PASSWORD_FILE if data_dir else None
         self.fingerprint = fingerprint
         self.log = log
         self.online = {}    # device id -> control StreamWriter
@@ -341,6 +343,8 @@ class Server:
                 return {"ok": False, "error": "weak password"}
             store.save_user(me, str(req["new"]), user["role"], user["groups"])
             store.log(me, "password_changed", me)
+            if me == "admin":
+                self._forget_initial_password()
             return {"ok": True}
         if op == "audit":       # the journal is open to every account, for accountability
             return {"ok": True, "audit": store.audit(min(5000, int(req.get("limit", 500))),
@@ -365,6 +369,8 @@ class Server:
             if existing and existing["role"] == "admin" and role != "admin" and self._last_admin(name):
                 return {"ok": False, "error": "last admin"}
             store.save_user(name, password, role, groups)
+            if name == "admin" and password:
+                self._forget_initial_password()
             store.log(me, "user_saved", name, f"role={role} groups={groups}"
                       + (" password changed" if password and existing else ""))
             return {"ok": True}
@@ -409,6 +415,16 @@ class Server:
             return {"ok": True, "token": store.setting("enroll_token"), "fingerprint": self.fingerprint}
         return {"ok": False, "error": "unknown op"}
 
+    def _forget_initial_password(self):
+        if self.password_file is not None:
+            try:
+                self.password_file.unlink()
+                self.log("initial admin password file removed")
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                self.log(f"could not remove {self.password_file}: {exc}")
+
     def _last_admin(self, name):
         admins = [u["name"] for u in self.store.users() if u["role"] == "admin"]
         return admins == [name]
@@ -449,9 +465,28 @@ class Server:
             ticket.done.set()
 
 
+def default_data_dir():
+    return Path(os.environ.get("MINIDECK_DATA") or Path.home() / ".minideck-server")
+
+
+def write_password_file(data, password):
+    """Keep the new admin password where a service or container operator can read it."""
+    path = data / PASSWORD_FILE
+    path.write_text(
+        "Minideck server - administrator account\n"
+        f"login   : admin\npassword: {password}\n\n"
+        "This file is deleted automatically when the admin password is changed.\n",
+        encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
+
+
 def main(port=DEFAULT_SERVER_PORT, bind="0.0.0.0", data_dir=None, public=None, reset_admin=False):
     from .config import new_password
-    data = Path(data_dir) if data_dir else Path.home() / ".minideck-server"
+    data = Path(data_dir) if data_dir else default_data_dir()
     data.mkdir(parents=True, exist_ok=True)
     store = Store(data / "minideck.db")
     crt, key, fingerprint = ensure_cert(data)
@@ -460,21 +495,33 @@ def main(port=DEFAULT_SERVER_PORT, bind="0.0.0.0", data_dir=None, public=None, r
         password = new_password(14)
         store.save_user("admin", password, "admin", "*")
         store.log("-", "admin_password_reset" if reset_admin else "server_initialized")
+        path = write_password_file(data, password)
         print("Administrator account:\n  login   : admin\n  password: " + password)
-        print("  (shown once - change it after the first login)")
+        print(f"  (also saved to {path} until the password is changed)")
+    elif (data / PASSWORD_FILE).exists():
+        print(f"Initial admin password is still in {data / PASSWORD_FILE} - change it in the console.")
     address = f"{public or '<server-address>'}:{port}"
     print(f"Data directory : {data}")
     print(f"Certificate    : SHA-256 {fingerprint}")
-    print(f"Enrollment code: minideck://{address}/{store.setting('enroll_token')}#{fingerprint}")
+    print(f"Enrollment code: minideck://{address}/{store.setting('enroll_token')}#{fingerprint}", flush=True)
 
     async def serve():
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(crt, key)
-        server = Server(store, fingerprint, log=lambda m: print(f"[server] {m}", flush=True))
+        server = Server(store, fingerprint, log=lambda m: print(f"[server] {m}", flush=True), data_dir=data)
         listener = await asyncio.start_server(server.handle, bind, port, ssl=context)
         print(f"Minideck server listening on {bind}:{port} (TLS)", flush=True)
-        async with listener:
-            await listener.serve_forever()
+        stop = asyncio.Event()
+        try:  # docker stop / systemctl stop send SIGTERM: shut down cleanly
+            import signal
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stop.set)
+        except (NotImplementedError, AttributeError, ValueError):
+            pass  # Windows: Ctrl+C / task end only
+        await stop.wait()
+        # stop accepting; open sessions are cancelled by asyncio.run on return
+        # (waiting for them, as Server.wait_closed does, would hang on idle device links)
+        listener.close()
+        print("Minideck server stopped", flush=True)
 
     try:
         asyncio.run(serve())

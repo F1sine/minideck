@@ -69,15 +69,52 @@ Relay только сводит два соединения и пересыла�
 
 ### 1. Запустить сервер
 
-На машине, доступной и администраторам, и клиентским ПК (порт 7072/TCP):
+Серверу нужна машина, доступная и администраторам, и клиентским ПК, с открытым портом **7072/TCP**.
+`--public` — адрес, по которому клиентские ПК будут к нему обращаться (DNS-имя или IP); он попадает
+в код регистрации.
+
+При первом запуске сервер создаёт учётную запись `admin`, печатает её пароль и **записывает его в файл
+`ADMIN-PASSWORD.txt` в папке данных** — так пароль не теряется, если сервер работает как служба или в
+контейнере. Файл удаляется сам, как только пароль `admin` сменён в консоли. Забыли пароль — запустите
+сервер с `--reset-admin`.
+
+В папке данных лежат база (пользователи, компьютеры, журнал), сертификат и ключ TLS — делайте её
+резервную копию. Сменился ключ — клиентским ПК придётся регистрироваться заново.
+
+**Linux, Docker** (рекомендуется для VPS):
 
 ```bash
-python -m minideck server --public server.example.com
+# в docker-compose.yml укажите MINIDECK_PUBLIC, затем:
+docker compose up -d
+docker compose logs          # пароль admin и код регистрации
 ```
 
-При первом запуске сервер создаёт учётную запись `admin`, один раз печатает её пароль, отпечаток
-сертификата и код регистрации. Данные лежат в `~/.minideck-server` (база, сертификат, ключ) — делайте
-резервную копию этой папки. Забытый пароль администратора: `python -m minideck server --reset-admin`.
+Данные хранятся в томе `minideck-data`, контейнер работает не от root, перезапускается сам и корректно
+останавливается по `docker stop`. Сброс пароля: `docker compose run --rm minideck-server --reset-admin`.
+
+**Linux без Docker** — служба systemd: инструкция по установке в начале файла
+`deploy/linux/minideck-server.service`. Пароль: `journalctl -u minideck-server`.
+
+**Windows** — `MinideckServer.exe` (консольная программа, собирается `build.bat`):
+
+```bash
+MinideckServer.exe --public server.example.com
+```
+
+Чтобы сервер работал постоянно и запускался вместе с Windows, положите рядом с `MinideckServer.exe`
+скрипты из `deploy\windows` и выполните в PowerShell, запущенном от имени администратора:
+
+```bash
+.\install-server.ps1 -Public server.example.com
+```
+
+Скрипт копирует сервер в `C:\Program Files\MinideckServer`, данные хранит в
+`C:\ProgramData\MinideckServer` (доступ только у администраторов и SYSTEM), создаёт задачу планировщика
+«Minideck Server» (запуск при загрузке от SYSTEM, перезапуск при сбое) и открывает порт в брандмауэре.
+Удаление: `.\uninstall-server.ps1` (данные сохраняются; `-RemoveData` удалит и их).
+
+**Из исходников**: `python -m minideck server --public server.example.com` (данные в `~/.minideck-server`
+или в папке из переменной `MINIDECK_DATA`).
 
 ### 2. Войти администратором
 
@@ -212,6 +249,7 @@ python -m minideck host --password МойПароль --relay relay.example.com
 | `minideck/viewer.py` | клиент: сетевой сеанс и окно просмотра |
 | `minideck/relay.py` | relay-сервер для подключения по ID |
 | `minideck/server.py` | сервер управления: учётные записи, роли, компьютеры, журнал |
+| `run_server.py`, `Dockerfile`, `deploy/` | запуск сервера: консольный exe, Docker, systemd, автозапуск на Windows |
 | `minideck/serverapi.py` | клиент сервера: TLS с проверкой отпечатка, API администратора, агент ПК |
 | `minideck/console.py` | консоль администратора |
 | `minideck/journal.py`, `journalui.py` | журнал действий и окно просмотра с выгрузкой в CSV |

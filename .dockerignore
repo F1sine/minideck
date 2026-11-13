@@ -1,0 +1,11 @@
+build/
+dist/
+*.spec
+.git/
+assets/
+deploy/windows/
+__pycache__/
+*.pyc
+*.db
+*.key
+*.crt

@@ -1,0 +1,43 @@
+# systemd unit for the Minideck management server (without Docker).
+#
+# Install (as root):
+#   useradd --system --home-dir /var/lib/minideck-server --shell /usr/sbin/nologin minideck
+#   mkdir -p /opt/minideck && cp -r minideck run_server.py /opt/minideck/
+#   python3 -m venv /opt/minideck/venv && /opt/minideck/venv/bin/pip install "cryptography>=42"
+#   cp deploy/linux/minideck-server.service /etc/systemd/system/
+#   edit --public below, then:
+#   systemctl daemon-reload && systemctl enable --now minideck-server
+#   journalctl -u minideck-server      # first admin password and enrollment code
+#   cat /var/lib/minideck-server/ADMIN-PASSWORD.txt
+#
+# Open TCP port 7072 in the firewall (e.g. ufw allow 7072/tcp).
+
+[Unit]
+Description=Minideck management server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=minideck
+Group=minideck
+StateDirectory=minideck-server
+StateDirectoryMode=0700
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/minideck/venv/bin/python /opt/minideck/run_server.py --port 7072 --data /var/lib/minideck-server --public server.example.com
+Restart=on-failure
+RestartSec=5
+
+# hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

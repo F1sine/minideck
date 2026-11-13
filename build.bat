@@ -1,5 +1,6 @@
 @echo off
-rem Builds dist\Minideck.exe (the program) and dist\MinideckSetup.exe (installer for client PCs).
+rem Builds dist\Minideck.exe (the program), dist\MinideckSetup.exe (installer for client PCs)
+rem and dist\MinideckServer.exe (console management server).
 cd /d "%~dp0"
 python -m pip install -r requirements.txt pyinstaller || goto :error
 
@@ -18,8 +19,15 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name MinideckSe
   --exclude-module numpy --exclude-module mss --exclude-module pynput ^
   setup_minideck.py || goto :error
 
+python -m PyInstaller --noconfirm --clean --onefile --console --name MinideckServer ^
+  --icon assets\icon.ico ^
+  --exclude-module tkinter --exclude-module customtkinter --exclude-module PIL ^
+  --exclude-module numpy --exclude-module mss --exclude-module pynput ^
+  --exclude-module matplotlib --exclude-module scipy --exclude-module pandas ^
+  run_server.py || goto :error
+
 echo.
-echo Done: dist\Minideck.exe and dist\MinideckSetup.exe
+echo Done: dist\Minideck.exe, dist\MinideckSetup.exe and dist\MinideckServer.exe
 exit /b 0
 
 :error

@@ -63,7 +63,7 @@ def main(argv=None):
     server = sub.add_parser("server", help="run the management server (accounts, roles, managed PCs)")
     server.add_argument("--port", type=int, default=DEFAULT_SERVER_PORT)
     server.add_argument("--bind", default="0.0.0.0")
-    server.add_argument("--data", help="data directory (default: ~/.minideck-server)")
+    server.add_argument("--data", help="data directory (default: $MINIDECK_DATA or ~/.minideck-server)")
     server.add_argument("--public", help="public host name, used in the printed enrollment code")
     server.add_argument("--reset-admin", action="store_true", help="set a new random password for 'admin'")
 
