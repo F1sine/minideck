@@ -11,7 +11,8 @@ from pathlib import Path
 from . import DEFAULT_PORT, DEFAULT_RELAY_PORT, VERSION
 from .journal import human_duration, human_size
 from .netutil import LineReader, connect_tcp, tune
-from .proto import AUTH_MAX_MESSAGE, MAX_MESSAGE, AuthError, Msg, ProtocolError, handshake
+from .proto import (AUTH_MAX_MESSAGE, MAX_MESSAGE, AuthError, Msg, ProtocolError,
+                    handshake, sign_identity)
 from .screen import ScreenGrabber, changed_rects, encode_frame
 
 DEFAULT_FPS = 30
@@ -218,7 +219,8 @@ class Host:
     """Listens for viewers (directly and/or through a relay) and runs their sessions."""
 
     def __init__(self, password, port=DEFAULT_PORT, allow_control=True,
-                 on_confirm=None, on_change=None, on_clipboard=None, log=None, on_event=None):
+                 on_confirm=None, on_change=None, on_clipboard=None, log=None, on_event=None,
+                 identity=None):
         self.password = password
         self.port = port
         self.allow_control = allow_control
@@ -232,6 +234,7 @@ class Host:
         self._lock = threading.Lock()
         self._fails = {}         # address -> when it recently got the password wrong
         self._slots = threading.Semaphore(MAX_HANDSHAKES)
+        self._identity = identity   # long-term key; loaded from the config folder on first use
         self._server = None
         self._injector = None
         self._injector_failed = False
@@ -247,6 +250,13 @@ class Host:
             self.on_event(action, who, detail, session.account if session is not None else None)
         except Exception:
             pass
+
+    def identity(self):
+        """This computer's long-term key, so a viewer can tell it is really us."""
+        if self._identity is None:
+            from .config import host_identity
+            self._identity = host_identity()
+        return self._identity
 
     def injector(self):
         if self._injector is None and not self._injector_failed:
@@ -355,6 +365,8 @@ class Host:
             if mtype != Msg.AUTH:
                 return
             name = label or str(json.loads(payload).get("name", "?"))[:64]
+            # prove which computer this is before anything else happens
+            conn.send_json(Msg.IDENT, sign_identity(self.identity(), conn.transcript))
             conn.max_message = MAX_MESSAGE   # frames and file chunks are big; the password is in
             sock.settimeout(None)
             self._slots.release()            # the expensive part is over

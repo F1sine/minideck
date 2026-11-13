@@ -20,7 +20,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import minideck.host as H                                            # noqa: E402
-from minideck.proto import AUTH_MAX_MESSAGE, MAX_MESSAGE, Msg, handshake   # noqa: E402
+from minideck.proto import (AUTH_MAX_MESSAGE, MAX_MESSAGE, Msg, handshake,   # noqa: E402
+                            load_identity)
 
 PASSWORD = "test-password-123"
 failures = []
@@ -45,11 +46,16 @@ class DummyGrabber:
         pass
 
 
+def temp_identity():
+    """A throwaway host key, so a test never touches the key in the user's own profile."""
+    return load_identity(Path(tempfile.mkdtemp(prefix="minideck-key-")) / "host_key")
+
+
 def start_host(control):
     """A host listening on a free port. Returns (host, port, clipboard texts it accepted)."""
     accepted = []
-    host = H.Host(PASSWORD, port=0, allow_control=True,
-                  on_clipboard=accepted.append, log=lambda msg: None)
+    host = H.Host(PASSWORD, port=0, allow_control=True, on_clipboard=accepted.append,
+                  log=lambda msg: None, identity=temp_identity())
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
@@ -82,7 +88,7 @@ def test_clipboard_needs_control():
     for control, expected in ((True, 1), (False, 0)):
         host, port, accepted = start_host(control)
         sock, conn = connect(port)
-        conn.recv()                                   # HELLO
+        conn.recv()                                   # IDENT: the host proves which computer it is
         conn.send(Msg.CLIPBOARD, "secret".encode("utf-8"))
         time.sleep(0.4)
         check("clipboard " + ("with control" if control else "view-only"),

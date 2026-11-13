@@ -14,7 +14,7 @@ from .host import Host, RelayClient
 from .journal import Journal
 from .journalui import LocalJournalWindow
 from .netutil import format_id, local_addresses, normalize_id
-from .proto import AuthError
+from .proto import AuthError, human_fingerprint, identity_of
 from .serverapi import ServerAgent, parse_enroll_code
 from .ui import (CARD, FIELD, GHOST, GREEN, GREY, MUTED, ORANGE, PAGE, RED, describe_error,
                  raise_window, set_window_icon)
@@ -389,6 +389,55 @@ class App:
         done.wait(40)
         return answer[0]
 
+    def identity_changed(self, got, expected, where=""):
+        """Called on a connecting thread: this computer answered with a different key than before."""
+        done, answer = threading.Event(), [False]
+        self.call_ui(self._ask_identity, got, expected, where, done, answer)
+        done.wait(180)
+        if answer[0]:
+            self.journal.add("out_identity_changed", where,
+                             f"{human_fingerprint(expected)} → {human_fingerprint(got)}")
+        return answer[0]
+
+    def _ask_identity(self, got, expected, where, done, answer):
+        dialog = ctk.CTkToplevel(self.root, fg_color=PAGE)
+        dialog.title("Ключ компьютера изменился")
+        dialog.resizable(False, False)
+        dialog.attributes("-topmost", True)
+        set_window_icon(dialog)
+        ctk.CTkLabel(dialog, text="Ключ компьютера изменился", font=self.f_title,
+                     text_color=ORANGE).pack(padx=28, pady=(22, 4))
+        if where:
+            ctk.CTkLabel(dialog, text=where, font=self.f_head).pack(padx=28)
+        ctk.CTkLabel(dialog, text="Было:  " + human_fingerprint(expected), text_color=MUTED,
+                     font=self.f_small).pack(padx=28, pady=(10, 0))
+        ctk.CTkLabel(dialog, text="Стало: " + human_fingerprint(got), font=self.f_small).pack(padx=28)
+        ctk.CTkLabel(dialog, text=(
+            "Так бывает после переустановки Minideck или системы на том компьютере. Но точно так же "
+            "выглядит подмена: кто-то мог встать в середину соединения и выдать себя за него. "
+            "Продолжайте только если знаете, почему ключ сменился — лучше спросите у человека за тем "
+            "компьютером его отпечаток (Настройки → Отпечаток этого компьютера)."),
+            wraplength=360, justify="left").pack(padx=28, pady=(12, 0))
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(padx=28, pady=20)
+        state = {"closed": False}
+
+        def finish(trust):
+            if state["closed"]:
+                return
+            state["closed"] = True
+            answer[0] = trust
+            done.set()
+            dialog.destroy()
+
+        ctk.CTkButton(buttons, text="Отменить", width=150, height=38,
+                      command=lambda: finish(False), **GHOST).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(buttons, text="Доверять новому", width=170, height=38, fg_color=RED,
+                      hover_color="#b8342d", command=lambda: finish(True)).pack(side="left")
+        dialog.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+        dialog.update_idletasks()
+        dialog.grab_set()
+
     def _ask_incoming(self, peer, name, done, answer):
         dialog = ctk.CTkToplevel(self.root, fg_color=PAGE)
         dialog.title("Входящее подключение")
@@ -623,8 +672,13 @@ class App:
             self._address.focus_set()
             return
         relay = self.cfg["relay"].strip() or None
+        slot = config.identity_slot(address)
         session = ViewerSession(address, self._remote_pwd.get(), relay,
-                                on_clipboard=lambda text: self.call_ui(self._set_clipboard, text))
+                                on_clipboard=lambda text: self.call_ui(self._set_clipboard, text),
+                                identity_slot=slot,
+                                expect_identity=config.known_identity(self.cfg, slot),
+                                on_identity_changed=lambda got, expected:
+                                    self.identity_changed(got, expected, address))
         self._set_connecting(True)
 
         def work():
@@ -670,6 +724,8 @@ class App:
             target = f"{target} · {session.address}"
         mode = "управление" if session.hello.get("control", True) else "только просмотр"
         self.journal.add("out_connect", target, mode + (", через сервер" if session.stream_factory else ""))
+        if config.remember_identity(self.cfg, session.identity_slot, session.identity):
+            self.journal.add("out_identity", target, human_fingerprint(session.identity))
         session.on_event = lambda action, detail: self.journal.add(action, target, detail)
 
         def closed(window):
@@ -782,6 +838,27 @@ class App:
         ctk.CTkButton(row, text="Проверить сейчас", width=140, height=30,
                       command=lambda: self._check_updates(manual=True), **GHOST).pack(side="right")
 
+        ctk.CTkLabel(dialog, text="Отпечаток этого компьютера", font=self.f_head).pack(
+            anchor="w", padx=24, pady=(8, 0))
+        ctk.CTkLabel(dialog, text="Назовите его тому, кто подключается, если его программа "
+                                  "предупредила, что ключ изменился.",
+                     text_color=MUTED, font=self.f_small, wraplength=360,
+                     justify="left").pack(anchor="w", padx=24)
+        ident_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        ident_row.pack(fill="x", padx=24, pady=(6, 6))
+        try:
+            mine = human_fingerprint(identity_of(config.host_identity()))
+        except OSError:
+            mine = "не удалось прочитать ключ"
+        ctk.CTkLabel(ident_row, text=mine, font=self.f_small).pack(side="left")
+        ctk.CTkButton(ident_row, text="Копировать", width=110, height=30,
+                      command=lambda: self._copy(mine.replace(" ", "")), **GHOST).pack(side="right")
+        known = len(self.cfg.get("known_hosts") or {})
+        if known:
+            ctk.CTkButton(dialog, text=f"Забыть запомненные ключи ({known})", height=30,
+                          command=lambda: self._forget_identities(dialog), **GHOST).pack(
+                anchor="w", padx=24, pady=(0, 6))
+
         error = ctk.CTkLabel(dialog, text="", text_color=RED, font=self.f_small)
         error.pack(anchor="w", padx=24)
 
@@ -835,6 +912,14 @@ class App:
         if self.cfg.get("update_check", True):
             self._check_updates()
         self.root.after(updater.CHECK_EVERY * 1000, self._auto_check)
+
+    def _forget_identities(self, dialog):
+        """After a legitimate reinstall on the other side, start pinning again from scratch."""
+        self.cfg["known_hosts"] = {}
+        config.save(self.cfg)
+        self.journal.add("identities_forgotten", "этот компьютер")
+        dialog.destroy()
+        self.toast("Запомненные ключи удалённых компьютеров забыты")
 
     def _check_updates(self, manual=False):
         source = (self.cfg.get("update_source") or "").strip() or None

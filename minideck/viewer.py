@@ -1,4 +1,5 @@
 """Viewer side: network session plus the Tk window that shows the remote screen."""
+import hmac
 import json
 import os
 import queue
@@ -15,7 +16,8 @@ from PIL import Image, ImageTk
 from . import VERSION
 from .journal import human_size
 from .netutil import open_stream
-from .proto import AuthError, Msg, ProtocolError, handshake
+from .proto import (AuthError, IdentityError, IdentityMismatch, Msg, ProtocolError,
+                    check_identity, handshake)
 from .screen import decode_frame
 
 CHUNK = 256 * 1024
@@ -24,12 +26,17 @@ CHUNK = 256 * 1024
 class ViewerSession:
     """Connection to a host. Frames are painted into self.image by a reader thread."""
 
-    def __init__(self, address, password, relay=None, on_clipboard=None, stream_factory=None):
+    def __init__(self, address, password, relay=None, on_clipboard=None, stream_factory=None,
+                 identity_slot=None, expect_identity=None, on_identity_changed=None):
         self.stream_factory = stream_factory   # () -> connected socket, for server-brokered sessions
         self.address = address
         self.password = password
         self.relay = relay
         self.on_clipboard = on_clipboard
+        self.identity_slot = identity_slot          # name to remember the fingerprint under
+        self.expect_identity = expect_identity      # fingerprint seen last time, if any
+        self.on_identity_changed = on_identity_changed   # (got, expected) -> bool, may ask the user
+        self.identity = ""                          # what the host proved this time
         self.conn = None
         self.hello = {}
         self.image = None           # full remote picture
@@ -60,6 +67,12 @@ class ViewerSession:
                 raise AuthError("wrong password") from None
             if mtype == Msg.BYE:
                 raise ConnectionError("rejected")
+            if mtype != Msg.IDENT:
+                raise IdentityError("the host did not say which computer it is")
+            self._check_identity(conn, json.loads(payload))
+            mtype, payload = conn.recv()            # the host answers after the person there agrees
+            if mtype == Msg.BYE:
+                raise ConnectionError("rejected")
             if mtype != Msg.HELLO:
                 raise ProtocolError("unexpected reply")
             self.hello = json.loads(payload)
@@ -70,6 +83,16 @@ class ViewerSession:
         self.conn = conn
         threading.Thread(target=self._read_loop, daemon=True).start()
         threading.Thread(target=self._write_loop, daemon=True).start()
+
+    def _check_identity(self, conn, info):
+        """Verify the host's key and compare it with the one seen last time."""
+        got = check_identity(info, conn.transcript)
+        expected = self.expect_identity
+        if expected and not hmac.compare_digest(got, expected):
+            # someone in the middle cannot sign for the key this computer remembers
+            if not (self.on_identity_changed and self.on_identity_changed(got, expected)):
+                raise IdentityMismatch(expected, got)
+        self.identity = got
 
     # -- threads ------------------------------------------------------------
     def _read_loop(self):

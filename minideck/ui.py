@@ -3,7 +3,7 @@ import sys
 import tkinter as tk
 
 from . import resource_path
-from .proto import AuthError, ProtocolError, VersionMismatch
+from .proto import AuthError, IdentityError, IdentityMismatch, ProtocolError, VersionMismatch
 from .serverapi import CertificateMismatch, ServerError
 
 MUTED = ("#5f6b7a", "#9aa4b2")
@@ -52,6 +52,11 @@ def describe_error(exc):
         return "Компьютер с таким ID не в сети."
     if "host did not answer" in text:
         return "Удалённый компьютер не ответил."
+    if isinstance(exc, IdentityMismatch):
+        return "Подключение отменено: удалённый компьютер назвался другим ключом, чем в прошлый раз."
+    if isinstance(exc, IdentityError):
+        return ("Удалённый компьютер не подтвердил, какой он: соединение могло быть подменено "
+                "или на той стороне старая версия Minideck.")
     if isinstance(exc, VersionMismatch):
         return ("На другом компьютере установлена более старая версия Minideck. "
                 "Обновите программу на обоих компьютерах: версии 0.4.0 и старше "

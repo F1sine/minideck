@@ -7,6 +7,7 @@ import customtkinter as ctk
 from . import DEFAULT_SERVER_PORT, config
 from .journalui import JournalView
 from .netutil import format_id
+from .proto import human_fingerprint
 from .serverapi import AdminClient, CertificateMismatch, make_enroll_code
 from .ui import (CARD, FIELD, GHOST, GREEN, GREY, HOVER, MUTED, PAGE, RED, RED_HOVER, ROLE_NAMES,
                  describe_error, raise_window, set_window_icon)
@@ -305,10 +306,17 @@ class Console(ctk.CTkToplevel):
         def work():
             try:
                 ticket = self.client.call("connect", id=device["id"])
+                slot = f"server:{device['id']}"
                 session = ViewerSession(
                     device["name"], ticket["secret"],
                     on_clipboard=lambda text: self.app.call_ui(self.app._set_clipboard, text),
-                    stream_factory=lambda: self.client.open_session(ticket["token"]))
+                    stream_factory=lambda: self.client.open_session(ticket["token"]),
+                    identity_slot=slot,
+                    # what the server knows about this computer, else what we saw last time
+                    expect_identity=(ticket.get("fingerprint")
+                                     or config.known_identity(self.app.cfg, slot)),
+                    on_identity_changed=lambda got, expected:
+                        self.app.identity_changed(got, expected, device["name"]))
                 session.connect()
                 return session
             finally:
@@ -324,6 +332,10 @@ class Console(ctk.CTkToplevel):
         dialog = self._dialog("Компьютер")
         ctk.CTkLabel(dialog, text=f"ID {format_id(device['id'])}  ·  {device['host']}", text_color=MUTED).pack(
             anchor="w", padx=24, pady=(0, 10))
+        if device.get("fingerprint"):
+            # the computer's own key: read it out to the person there if the viewer warns
+            ctk.CTkLabel(dialog, text="Отпечаток: " + human_fingerprint(device["fingerprint"]),
+                         text_color=MUTED).pack(anchor="w", padx=24, pady=(0, 10))
         name = self._entry(dialog, "Название", device["name"])
         group = self._entry(dialog, "Группа", device["group"], "например: office",
                             hint="По группам операторам и наблюдателям выдаётся доступ.")

@@ -59,6 +59,10 @@ class Store:
             CREATE TABLE IF NOT EXISTS audit(ts INTEGER, user TEXT, action TEXT, target TEXT, detail TEXT);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
         """)
+        # the computer's own fingerprint, so a viewer can check it on the first connection
+        if "fingerprint" not in {r["name"] for r in self.db.execute("PRAGMA table_info(devices)")}:
+            self.db.execute("ALTER TABLE devices ADD COLUMN fingerprint TEXT DEFAULT ''")
+            self.db.commit()
         if self.setting("enroll_token") is None:
             self.set_setting("enroll_token", secrets.token_urlsafe(18))
 
@@ -113,15 +117,17 @@ class Store:
         row = self.db.execute("SELECT * FROM devices WHERE id=?", (ident,)).fetchone()
         return dict(row) if row else None
 
-    def add_device(self, ident, key_hash, name, platform):
+    def add_device(self, ident, key_hash, name, platform, fingerprint=""):
         now = int(time.time())
-        self.db.execute("INSERT INTO devices VALUES(?,?,?,?,?,?,?,?)",
-                        (ident, key_hash, name, name, platform, "", now, now))
+        self.db.execute(
+            "INSERT INTO devices(id, key_hash, name, host, platform, grp, enrolled, last_seen,"
+            " fingerprint) VALUES(?,?,?,?,?,?,?,?,?)",
+            (ident, key_hash, name, name, platform, "", now, now, fingerprint))
         self.db.commit()
 
     def update_device(self, ident, **fields):
         for column, value in fields.items():
-            if column in ("name", "grp", "host", "platform", "last_seen"):
+            if column in ("name", "grp", "host", "platform", "last_seen", "fingerprint"):
                 self.db.execute(f"UPDATE devices SET {column}=? WHERE id=?", (value, ident))
         self.db.commit()
 
@@ -230,6 +236,7 @@ class Server:
         ident, key = str(msg.get("id", "")), str(msg.get("key", ""))
         name = str(msg.get("name", "?"))[:64]
         platform = str(msg.get("platform", ""))[:16]
+        fingerprint = str(msg.get("fingerprint", ""))[:64]
         if self._blocked(ip) or not ID_RE.fullmatch(ident) or len(key) < 16:
             await self._send(writer, {"ok": False, "error": "bad request"})
             return
@@ -240,7 +247,7 @@ class Server:
                 self._fail(ip)
                 await self._send(writer, {"ok": False, "error": "enrollment required"})
                 return
-            self.store.add_device(ident, _sha(key), name, platform)
+            self.store.add_device(ident, _sha(key), name, platform, fingerprint)
             self.store.log("-", "device_enrolled", ident, f"{name} ({ip})")
             self.log(f"enrolled {ident} {name}")
         elif not hmac.compare_digest(device["key_hash"], _sha(key)):
@@ -249,6 +256,13 @@ class Server:
             return
         else:
             self.store.update_device(ident, host=name, platform=platform)
+            known = device["fingerprint"] or ""
+            if fingerprint and fingerprint != known:
+                # a reinstall changes it; so does someone answering in this computer's place
+                self.store.update_device(ident, fingerprint=fingerprint)
+                if known:
+                    self.store.log("-", "device_key_changed", ident, f"{known} -> {fingerprint}")
+                    self.log(f"device {ident} changed its key")
         old = self.online.get(ident)
         if old is not None:
             old.close()
@@ -317,7 +331,8 @@ class Server:
                 if self._allowed(user, d):
                     items.append({"id": d["id"], "name": d["name"], "host": d["host"],
                                   "group": d["grp"], "platform": d["platform"],
-                                  "online": d["id"] in self.online, "last_seen": d["last_seen"]})
+                                  "online": d["id"] in self.online, "last_seen": d["last_seen"],
+                                  "fingerprint": d["fingerprint"] or ""})
             return {"ok": True, "devices": items}
         if op == "connect":
             device = store.device(str(req["id"]))
@@ -335,7 +350,7 @@ class Server:
             await self._send(control_channel, {"op": "incoming", "token": token, "secret": secret,
                                                "user": me, "role": user["role"], "control": control})
             return {"ok": True, "token": token, "secret": secret, "control": control,
-                    "name": device["name"]}
+                    "name": device["name"], "fingerprint": device["fingerprint"] or ""}
         if op == "passwd":
             if not hmac.compare_digest(_scrypt(str(req["old"]), user["salt"]), user["hash"]):
                 return {"ok": False, "error": "bad credentials"}

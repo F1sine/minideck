@@ -209,7 +209,7 @@ class ServerAgent:
                 channel = self._channel = Channel(sock)
                 channel.send({"op": "device", "id": self.ident, "key": self.key,
                               "name": socket.gethostname(), "platform": sys.platform,
-                              "enroll": self.enroll_token})
+                              "enroll": self.enroll_token, "fingerprint": self._fingerprint()})
                 reply = channel.recv()
                 if not reply.get("ok"):
                     code = reply.get("error", "error")
@@ -242,6 +242,14 @@ class ServerAgent:
                 if self._stopped:
                     return
                 time.sleep(0.1)
+
+    def _fingerprint(self):
+        """This computer's long-term fingerprint, so the server can pass it to viewers."""
+        try:
+            from .proto import identity_of
+            return identity_of(self.host.identity())
+        except (OSError, ValueError):
+            return ""
 
     def _ping(self, channel):
         while not self._stopped and channel is self._channel:
