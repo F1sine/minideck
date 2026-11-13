@@ -1,7 +1,7 @@
 """Minideck - a small self-hosted remote desktop tool."""
 import sys
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 DEFAULT_PORT = 7070
 DEFAULT_RELAY_PORT = 7071
 DEFAULT_SERVER_PORT = 7072
