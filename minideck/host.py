@@ -19,6 +19,8 @@ DEFAULT_FPS = 30
 DOWNLOAD_DIR = Path.home() / "Downloads" / "Minideck"
 MAX_FAILS = 5              # wrong passwords tolerated from one address ...
 FAIL_WINDOW = 60.0         # ... within this many seconds
+MAX_HANDSHAKES = 4         # at once: each one costs scrypt memory, so this bounds the hit
+HANDSHAKE_WAIT = 10.0      # seconds a connection waits for a free slot
 MAX_FILE = 2 * 1024 ** 3         # largest single file a viewer may send to this computer
 MAX_FILES_TOTAL = 8 * 1024 ** 3  # ... and the total one session may write
 
@@ -229,6 +231,7 @@ class Host:
         self.listen_error = None
         self._lock = threading.Lock()
         self._fails = {}         # address -> when it recently got the password wrong
+        self._slots = threading.Semaphore(MAX_HANDSHAKES)
         self._server = None
         self._injector = None
         self._injector_failed = False
@@ -330,7 +333,13 @@ class Host:
         if self._locked_out(peer):
             sock.close()
             return
+        if not self._slots.acquire(timeout=HANDSHAKE_WAIT):
+            # too many handshakes in flight: better to turn one away than to run out of memory
+            self.log(f"busy, refused {peer}")
+            sock.close()
+            return
         conn = None
+        authenticated = False
         try:
             sock.settimeout(15)
             conn = handshake(sock, password or self.password, True)
@@ -348,6 +357,8 @@ class Host:
             name = label or str(json.loads(payload).get("name", "?"))[:64]
             conn.max_message = MAX_MESSAGE   # frames and file chunks are big; the password is in
             sock.settimeout(None)
+            self._slots.release()            # the expensive part is over
+            authenticated = True
             if self.on_confirm and not self.on_confirm(peer, name):
                 conn.send_json(Msg.BYE, {"reason": "rejected"})
                 self.log(f"rejected {name} ({peer})")
@@ -375,6 +386,8 @@ class Host:
         except (OSError, ValueError, ProtocolError):
             pass
         finally:
+            if not authenticated:
+                self._slots.release()
             if conn is not None:
                 conn.close()
             else:
