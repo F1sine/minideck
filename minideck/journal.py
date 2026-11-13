@@ -32,6 +32,8 @@ ACTIONS = {
     "setting_changed": "изменена настройка доступа",
     "server_joined": "компьютер подключён к серверу организации",
     "server_left": "компьютер отключён от сервера организации",
+    "update_started": "запущено обновление программы",
+    "program_updated": "программа обновлена",
     # this computer accessed another one
     "out_connect": "подключение к удалённому компьютеру",
     "out_disconnect": "отключение от удалённого компьютера",

@@ -8,7 +8,7 @@ import tkinter as tk
 import customtkinter as ctk
 from PIL import Image
 
-from . import DEFAULT_PORT, VERSION, autostart, config, resource_path
+from . import DEFAULT_PORT, VERSION, autostart, config, resource_path, updater
 from .console import LoginDialog
 from .host import Host, RelayClient
 from .journal import Journal
@@ -94,6 +94,10 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
         self.root.after(50, self._pump)
         self.root.after(1000, self._poll_clipboard)
+        self._note_version()
+        self._update = None              # newer release found by the last check
+        if self.cfg.get("update_check", True):
+            self.root.after(10_000, self._auto_check)
 
     # -- layout -------------------------------------------------------------
     def _build(self):
@@ -115,7 +119,22 @@ class App:
         ctk.CTkButton(header, text="Журнал", width=90, command=self._open_journal, **GHOST).pack(
             side="right", padx=(0, 8))
 
-        body = ctk.CTkFrame(root, fg_color="transparent")
+        # "new version" strip, shown only when an update is available
+        self._update_bar = ctk.CTkFrame(root, fg_color=("#dbeafe", "#1e3a5f"), corner_radius=10)
+        self._update_text = ctk.CTkLabel(self._update_bar, text="", anchor="w",
+                                         text_color=("#1e3a8a", "#dbeafe"))
+        self._update_text.pack(side="left", padx=(14, 8), pady=8)
+        ctk.CTkButton(self._update_bar, text="✕", width=30, height=30, fg_color="transparent",
+                      text_color=("#1e3a8a", "#dbeafe"), hover_color=("#bfdbfe", "#27507f"),
+                      command=self._update_bar_hide).pack(side="right", padx=(0, 6))
+        self._update_notes = ctk.CTkButton(self._update_bar, text="Что нового", width=100, height=30,
+                                           command=self._open_release_page, **GHOST)
+        self._update_notes.pack(side="right", padx=4)
+        self._update_btn = ctk.CTkButton(self._update_bar, text="Обновить", width=110, height=30,
+                                         command=self._install_update)
+        self._update_btn.pack(side="right", padx=4)
+
+        body = self._body = ctk.CTkFrame(root, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=20, pady=(0, 8))
         self._build_local(body)
         self._build_remote(body)
@@ -754,10 +773,20 @@ class App:
             ctk.CTkSwitch(dialog, text="Запускать Minideck при входе в Windows (свёрнутым)", variable=startup,
                           switch_width=38, switch_height=20).pack(anchor="w", padx=24, pady=(4, 6))
 
+        ctk.CTkLabel(dialog, text="Обновления", font=self.f_head).pack(anchor="w", padx=24, pady=(8, 0))
+        auto_update = tk.BooleanVar(value=self.cfg.get("update_check", True))
+        row = ctk.CTkFrame(dialog, fg_color="transparent")
+        row.pack(fill="x", padx=24, pady=(4, 6))
+        ctk.CTkSwitch(row, text="Проверять новые версии", variable=auto_update,
+                      switch_width=38, switch_height=20).pack(side="left")
+        ctk.CTkButton(row, text="Проверить сейчас", width=140, height=30,
+                      command=lambda: self._check_updates(manual=True), **GHOST).pack(side="right")
+
         error = ctk.CTkLabel(dialog, text="", text_color=RED, font=self.f_small)
         error.pack(anchor="w", padx=24)
 
         def save():
+            self.cfg["update_check"] = auto_update.get()
             try:
                 if startup.get() != autostart.is_enabled():
                     autostart.set_enabled(startup.get())
@@ -791,6 +820,94 @@ class App:
                       command=cancel).pack(side="right", padx=(0, 8))
         dialog.protocol("WM_DELETE_WINDOW", cancel)
         dialog.after(150, lambda: (dialog.lift(), dialog.focus_force()))
+
+    # -- updates --------------------------------------------------------------
+    def _note_version(self):
+        """Record in the journal that the program was updated since it last ran."""
+        last = self.cfg.get("last_version") or ""
+        if last != VERSION:
+            if last:
+                self.journal.add("program_updated", "этот компьютер", f"{last} → {VERSION}")
+            self.cfg["last_version"] = VERSION
+            config.save(self.cfg)
+
+    def _auto_check(self):
+        if self.cfg.get("update_check", True):
+            self._check_updates()
+        self.root.after(updater.CHECK_EVERY * 1000, self._auto_check)
+
+    def _check_updates(self, manual=False):
+        source = (self.cfg.get("update_source") or "").strip() or None
+
+        def work():
+            try:
+                found = updater.check(source)
+            except updater.UpdateError as exc:
+                if manual:
+                    self.call_ui(self.toast, str(exc).capitalize(), 5000)
+                return
+            if found:
+                self.call_ui(self._update_bar_show, found)
+            elif manual:
+                self.call_ui(self.toast, f"Установлена последняя версия ({VERSION})")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_bar_show(self, found):
+        self._update = found
+        auto = updater.installed_copy() and found.get("setup") and found["setup"].get("sha256")
+        self._update_text.configure(text=f"Доступна новая версия Minideck {found['version']} "
+                                         f"(у вас {VERSION})")
+        self._update_btn.configure(state="normal", text="Обновить" if auto else "Скачать")
+        self._update_bar.pack(fill="x", padx=20, pady=(0, 8), before=self._body)
+
+    def _update_bar_hide(self):
+        self._update_bar.pack_forget()
+
+    def _open_release_page(self):
+        import webbrowser
+        if self._update and self._update.get("page"):
+            webbrowser.open(self._update["page"])
+
+    def _install_update(self):
+        found = self._update
+        if not found:
+            return
+        if not (updater.installed_copy() and found.get("setup") and found["setup"].get("sha256")):
+            self._open_release_page()    # portable copy or run from source: just open the download page
+            return
+        if self.host.sessions:
+            self.toast("Сейчас к этому компьютеру подключены — обновите после окончания сеанса", 5000)
+            return
+        self._update_btn.configure(state="disabled", text="Загрузка…")
+
+        def progress(done, total):
+            if total:
+                percent = done * 100 // total
+                self.call_ui(lambda: self._update_btn.configure(text=f"Загрузка {percent}%"))
+
+        def work():
+            try:
+                path = updater.download(found["setup"], progress)
+            except updater.UpdateError as exc:
+                self.call_ui(self._update_failed, str(exc))
+                return
+            self.call_ui(self._run_update, path, found["version"])
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_failed(self, text):
+        self._update_btn.configure(state="normal", text="Обновить")
+        self.toast(f"Обновление не удалось: {text}", 6000)
+
+    def _run_update(self, path, version):
+        if self.host.sessions:          # someone connected while the file was downloading
+            self._update_btn.configure(state="normal", text="Обновить")
+            self.toast("К компьютеру подключились — обновите после окончания сеанса", 5000)
+            return
+        self.journal.add("update_started", "этот компьютер", f"{VERSION} → {version}")
+        updater.start_update(path)
+        self._shutdown()
 
     # -- clipboard ----------------------------------------------------------
     def _poll_clipboard(self):
@@ -838,6 +955,9 @@ class App:
     def _quit(self):
         if self.host.sessions and not self._ask_quit():
             return
+        self._shutdown()
+
+    def _shutdown(self):
         for window in list(self.viewers):
             window.session.close()
         if self.console is not None and self.console.winfo_exists():

@@ -262,7 +262,82 @@ class Wizard:
 
 
 def run_setup():
-    Wizard().run()
+    if "--update" in sys.argv[1:]:
+        wait_pid = next((int(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--wait-pid=")), None)
+        run_update(wait_pid)
+    else:
+        Wizard().run()
+
+
+def _wait_for_exit(pid, timeout=30):
+    """Wait until the Minideck that started the update has closed."""
+    if not pid or sys.platform != "win32":
+        return
+    import ctypes
+    handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+    if handle:
+        ctypes.windll.kernel32.WaitForSingleObject(handle, int(timeout * 1000))
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def run_update(wait_pid=None):
+    """Unattended update started from the program itself: same folder, same shortcuts and autostart."""
+    from . import autostart
+    ctk.set_appearance_mode("system")
+    root = ctk.CTk(fg_color=PAGE)
+    root.title("Обновление Minideck")
+    root.geometry("440x170")
+    root.resizable(False, False)
+    set_window_icon(root)
+    ctk.CTkLabel(root, text=f"Обновление Minideck до версии {VERSION}",
+                 font=ctk.CTkFont(size=17, weight="bold")).pack(anchor="w", padx=24, pady=(22, 6))
+    status = ctk.CTkLabel(root, text="Ожидание закрытия программы…", text_color=MUTED, anchor="w",
+                          wraplength=390, justify="left")
+    status.pack(fill="x", padx=24)
+    bar = ctk.CTkProgressBar(root, mode="indeterminate", height=6)
+    bar.pack(fill="x", padx=24, pady=14)
+    bar.start()
+    row = ctk.CTkFrame(root, fg_color="transparent")
+    row.pack(fill="x", padx=24)
+
+    def say(text):
+        root.after(0, lambda: status.configure(text=text))
+
+    def failed(text):
+        bar.stop()
+        bar.pack_forget()
+        status.configure(text=text, text_color=RED)
+        ctk.CTkButton(row, text="Закрыть", width=110, height=34, command=root.destroy).pack(side="right")
+
+    def work():
+        try:
+            _wait_for_exit(wait_pid)
+            info = installer.installed_info()
+            if not info:
+                root.after(0, lambda: failed("Minideck не установлен на этом компьютере. "
+                                             "Запустите установщик обычным способом."))
+                return
+            target = Path(info["location"])
+            desktop_dir = installer.special_folder("Desktop")
+            desktop = bool(desktop_dir and (desktop_dir / f"{installer.APP_NAME}.lnk").exists())
+            start_with_windows = autostart.is_enabled()
+            try:
+                exe = installer.install(target, desktop, start_with_windows, say)
+            except installer.FileBusy:
+                say("Закрытие запущенного Minideck…")
+                installer.close_running()
+                import time
+                time.sleep(1.5)
+                exe = installer.install(target, desktop, start_with_windows, say)
+            say("Готово. Запуск Minideck…")
+            installer.launch(exe)
+            root.after(1200, root.destroy)
+        except Exception as exc:
+            root.after(0, lambda: failed(f"Обновление не удалось: {exc}"))
+
+    threading.Thread(target=work, daemon=True).start()
+    root.after(150, lambda: (root.lift(), root.focus_force()))
+    root.mainloop()
 
 
 def run_uninstall():

@@ -22,6 +22,9 @@ DEFAULTS = {
     "server": {},            # management server this PC is enrolled in: {address, pin}
     "pending_enroll": "",    # enrollment code left by the installer, used once on next start
     "admin_server": {},      # last server the administrator console signed in to (no password)
+    "update_check": True,    # look for a newer release on start and every few hours
+    "update_source": "",     # releases API URL; empty = github.com/F1sine/minideck
+    "last_version": "",      # version that ran last time, to record updates in the journal
     "recent": [],            # addresses of past connections; never passwords
 }
 
