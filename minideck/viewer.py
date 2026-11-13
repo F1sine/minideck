@@ -32,7 +32,11 @@ class ViewerSession:
         self.on_clipboard = on_clipboard
         self.conn = None
         self.hello = {}
-        self.image = None
+        self.image = None           # full remote picture
+        self.shown = None           # copy scaled to fit self.target (built off the UI thread)
+        self.view = (0, 0, 1, 1)    # where self.shown sits on the canvas: x, y, w, h
+        self.target = None          # canvas size (w, h), set by the window
+        self._shown_for = None      # (target, image size) self.shown was last fully built for
         self.lock = threading.Lock()
         self.dirty = False
         self.frames = 0
@@ -91,11 +95,60 @@ class ViewerSession:
         with self.lock:
             if self.image is None or self.image.size != size:
                 self.image = Image.new("RGB", size)
+        boxes = []
         for x, y, tile in tiles:
             with self.lock:
                 self.image.paste(tile, (x, y))
+            boxes.append((x, y, x + tile.width, y + tile.height))
+        if not self._rescale_boxes(boxes):
+            self.rescale()
         self.frames += 1
         self.dirty = True
+
+    def _rescale_boxes(self, boxes):
+        """Update only the changed parts of self.shown. False if a full rescale is needed."""
+        target = self.target
+        with self.lock:
+            shown = self.shown
+            if shown is None or self._shown_for != (target, self.image.size):
+                return False           # window or remote resolution changed since the last full rescale
+            iw, ih = self.image.size
+            w, h = shown.size
+            if sum((b[2] - b[0]) * (b[3] - b[1]) for b in boxes) > iw * ih * 0.6:
+                return False           # most of the screen changed: one full resize is cheaper
+            if (w, h) == (iw, ih):
+                for box in boxes:
+                    shown.paste(self.image.crop(box), box[:2])
+                return True
+            sx, sy = w / iw, h / ih
+            for x0, y0, x1, y1 in boxes:
+                # destination area, grown by a pixel so bilinear edges blend with neighbours
+                dx0, dy0 = max(0, int(x0 * sx) - 1), max(0, int(y0 * sy) - 1)
+                dx1, dy1 = min(w, int(x1 * sx + 0.999) + 1), min(h, int(y1 * sy + 0.999) + 1)
+                src = (dx0 / sx, dy0 / sy, dx1 / sx, dy1 / sy)
+                shown.paste(self.image.resize((dx1 - dx0, dy1 - dy0), Image.BILINEAR, box=src), (dx0, dy0))
+            return True
+
+    def rescale(self):
+        """Fit the picture into self.target. Runs on the reader thread for every frame,
+        so the UI thread only has to hand the ready image to Tk."""
+        target = self.target
+        if target is None or self.image is None:
+            return
+        cw, ch = target
+        with self.lock:
+            iw, ih = self.image.size
+            ratio = min(cw / iw, ch / ih)
+            w, h = max(1, int(iw * ratio)), max(1, int(ih * ratio))
+            if (w, h) == (iw, ih):
+                shown = self.image.copy()
+            elif ratio <= 0.5 + 1e-6 and (iw // 2, ih // 2) == (w, h):
+                shown = self.image.reduce(2)
+            else:
+                shown = self.image.resize((w, h), Image.BILINEAR, reducing_gap=2.0)
+            self.shown = shown
+            self.view = ((cw - w) // 2, (ch - h) // 2, w, h)
+            self._shown_for = (target, (iw, ih))
 
     def _write_loop(self):
         try:
@@ -165,6 +218,8 @@ class ViewerSession:
 
 QUALITY = [("Низкое", 35), ("Среднее", 60), ("Высокое", 85)]
 SCALE = [("100%", 1.0), ("75%", 0.75), ("50%", 0.5)]
+FPS = [("15 к/с", 15), ("30 к/с", 30), ("45 к/с", 45)]
+DEFAULT_FPS = "30 к/с"
 COMBOS = [
     ("Win", ["Win_L"]),
     ("Alt+Tab", ["Alt_L", "Tab"]),
@@ -209,6 +264,7 @@ class ViewerWindow(ctk.CTkToplevel):
                                   text_color="#ffffff", height=34)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(15, self._tick)
+        self.after(50, self._apply_settings)
         self.after(200, lambda: (self.lift(), self.focus_force(), self.canvas.focus_set()))
 
     # -- toolbar ------------------------------------------------------------
@@ -229,6 +285,10 @@ class ViewerWindow(ctk.CTkToplevel):
         self._scale_menu = ctk.CTkOptionMenu(bar, values=[s[0] for s in SCALE], width=84,
                                              command=lambda _: self._apply_settings(), **menu)
         self._scale_menu.pack(side="left")
+        self._fps_menu = ctk.CTkOptionMenu(bar, values=[f[0] for f in FPS], width=92,
+                                           command=lambda _: self._apply_settings(), **menu)
+        self._fps_menu.set(DEFAULT_FPS)
+        self._fps_menu.pack(side="left", padx=(8, 0))
         if self.control:
             self._keys_menu = ctk.CTkOptionMenu(bar, values=[c[0] for c in COMBOS], width=120,
                                                 command=self._on_combo, **menu)
@@ -247,7 +307,7 @@ class ViewerWindow(ctk.CTkToplevel):
     def _apply_settings(self):
         quality = dict(QUALITY)[self._quality_seg.get()]
         scale = dict(SCALE)[self._scale_menu.get()]
-        self.session.send_settings(quality=quality, scale=scale)
+        self.session.send_settings(quality=quality, scale=scale, fps=dict(FPS)[self._fps_menu.get()])
         self.canvas.focus_set()
 
     def _on_combo(self, label):
@@ -376,28 +436,34 @@ class ViewerWindow(ctk.CTkToplevel):
             self._pending_move = None
             s.send_input({"t": "move", "x": x, "y": y})
         size = (self.canvas.winfo_width(), self.canvas.winfo_height())
-        if (s.dirty or size != self._last_size) and s.image is not None and size[0] > 1:
+        if (s.dirty or size != self._last_size) and s.image is not None and size[0] > 1 and size[1] > 1:
             s.dirty = False
             self._last_size = size
             self._render(size)
         if self._fullscreen:
             self._autohide_bar()
         self._update_status()
-        self.after(15, self._tick)
+        self.after(8, self._tick)
 
     def _render(self, size):
         s = self.session
-        cw, ch = size
-        with s.lock:
-            iw, ih = s.image.size
-            ratio = min(cw / iw, ch / ih)
-            w, h = max(1, int(iw * ratio)), max(1, int(ih * ratio))
-            shown = s.image.copy() if (w, h) == (iw, ih) else s.image.resize((w, h), Image.BILINEAR)
-        ox, oy = (cw - w) // 2, (ch - h) // 2
-        self._view = (ox, oy, w, h)
-        self._photo = ImageTk.PhotoImage(shown)
-        self.canvas.itemconfigure(self._item, image=self._photo)
-        self.canvas.coords(self._item, ox, oy)
+        if size != s.target:            # window resized: rescale once here, later frames come ready
+            s.target = size
+            s.rescale()
+        with s.lock:                    # shown is updated in place by the reader thread
+            shown, view = s.shown, s.view
+            if shown is None:
+                return
+            self._view = view
+            if self._photo is not None and (self._photo.width(), self._photo.height()) == shown.size:
+                self._photo.paste(shown)    # ~1.5 ms, versus ~5-11 ms for a new PhotoImage
+                fresh = False
+            else:
+                self._photo = ImageTk.PhotoImage(shown)
+                fresh = True
+        if fresh:
+            self.canvas.itemconfigure(self._item, image=self._photo)
+        self.canvas.coords(self._item, view[0], view[1])
 
     def _update_status(self):
         now = time.monotonic()

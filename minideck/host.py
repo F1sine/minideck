@@ -12,7 +12,9 @@ from . import DEFAULT_PORT, DEFAULT_RELAY_PORT, VERSION
 from .journal import human_duration, human_size
 from .netutil import LineReader, connect_tcp, tune
 from .proto import AuthError, Msg, ProtocolError, handshake
-from .screen import ScreenGrabber, changed_rects, encode_frame, scale_frame
+from .screen import ScreenGrabber, changed_rects, encode_frame
+
+DEFAULT_FPS = 30
 
 DOWNLOAD_DIR = Path.home() / "Downloads" / "Minideck"
 MAX_FAILS = 5          # wrong passwords tolerated ...
@@ -33,7 +35,8 @@ class HostSession:
         self.running = True
         self.quality = 60
         self.scale = 1.0
-        self.fps = 20
+        self.fps = DEFAULT_FPS
+        self.capture_backend = ""
         self.force_full = True
         self.geom = None
         self._file = None
@@ -48,24 +51,41 @@ class HostSession:
             self.stop()
             return
         self.geom = (grabber.left, grabber.top, grabber.width, grabber.height)
+        self.capture_backend = grabber.backend
+        from .inputctl import keep_display_on, wake_display
+        keep_display_on(True)            # a blanked monitor would freeze the picture
+        if self.can_control:             # view-only sessions never inject input, not even this
+            wake_display()
+        self.host.log(f"screen capture: {grabber.backend}")
         prev = None
+        next_at = time.monotonic()
         try:
             while self.running:
-                started = time.monotonic()
-                frame = scale_frame(grabber.grab(), self.scale)
-                if self.force_full:
-                    self.force_full = False
-                    prev = None
-                rects = changed_rects(prev, frame)
-                if rects:
-                    self.conn.send(Msg.FRAME, encode_frame(frame, rects, self.quality))
+                force = self.force_full
+                frame = grabber.grab(force=force or prev is None)
+                if frame is not None:
+                    if force:
+                        self.force_full = False
+                        prev = None
+                    rects = changed_rects(prev, frame)
+                    if rects:
+                        # sendall blocks on a slow link: that is the back-pressure that
+                        # lowers the frame rate instead of piling frames up in memory
+                        self.conn.send(Msg.FRAME, encode_frame(frame, rects, self.quality, self.scale))
                     prev = frame
-                delay = 1.0 / self.fps - (time.monotonic() - started)
+                # fixed cadence: the next frame is due 1/fps after the previous one was due
+                next_at += 1.0 / self.fps
+                delay = next_at - time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
+                else:
+                    next_at = time.monotonic()   # running behind: don't try to catch up
         except (OSError, ValueError):
-            pass
+            pass                             # connection closed
+        except Exception as exc:             # never leave the viewer staring at a frozen picture
+            self.host.log(f"screen capture stopped: {exc!r}")
         finally:
+            keep_display_on(False)
             grabber.close()
             self.stop()
 

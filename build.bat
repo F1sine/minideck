@@ -7,6 +7,7 @@ python -m pip install -r requirements.txt pyinstaller || goto :error
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name Minideck ^
   --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 ^
   --hidden-import PIL._tkinter_finder --collect-all customtkinter ^
+  --collect-all dxcam --collect-submodules comtypes ^
   --icon assets\icon.ico --add-data "assets\icon.ico;assets" --add-data "assets\icon.png;assets" ^
   --exclude-module matplotlib --exclude-module scipy --exclude-module pandas ^
   run_minideck.py || goto :error

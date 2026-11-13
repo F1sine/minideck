@@ -18,6 +18,45 @@ SPECIAL = {
 SPECIAL.update({f"F{i}": f"f{i}" for i in range(1, 21)})
 
 
+ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED = 0x80000000, 0x00000001, 0x00000002
+
+
+def keep_display_on(enabled):
+    """While a session runs, stop Windows from blanking the screen or sleeping.
+    Applies to the calling thread and lapses automatically when that thread ends."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED if enabled else 0)
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(flags)
+    except Exception:
+        pass
+
+
+def wake_display():
+    """Turn a power-saved monitor back on: nudge the mouse one pixel and straight back.
+    (Windows ignores zero-distance moves when deciding whether the user is active.)"""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG), ("mouseData", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", wintypes.DWORD), ("mi", MOUSEINPUT), ("_pad", ctypes.c_byte * 8)]
+
+    events = (INPUT * 2)(INPUT(0, MOUSEINPUT(1, 0, 0, 0x0001, 0, 0)),   # INPUT_MOUSE, MOUSEEVENTF_MOVE +1
+                         INPUT(0, MOUSEINPUT(-1, 0, 0, 0x0001, 0, 0)))  # and back
+    try:
+        ctypes.windll.user32.SendInput(2, events, ctypes.sizeof(INPUT))
+    except Exception:
+        pass
+
+
 class InputInjector:
     def __init__(self):
         from pynput import keyboard, mouse  # imported lazily: needs a display
