@@ -74,6 +74,26 @@ def describe_error(exc):
     return f"Не удалось подключиться: {text}"
 
 
+def keep_on_screen(window, margin=48):
+    """Move a window up when its bottom would fall off the screen (small or scaled displays).
+
+    Uses tkinter's own wm_geometry, in real pixels: customtkinter rescales geometry strings.
+    """
+    import re
+    try:
+        window.update_idletasks()
+        match = re.fullmatch(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", tk.Wm.wm_geometry(window))
+        if not match:
+            return
+        _, height, x, y = map(int, match.groups())
+        title = max(0, window.winfo_rooty() - y)           # the frame above the client area
+        limit = window.winfo_screenheight() - margin        # leave room for the taskbar
+        if y + title + height > limit:
+            tk.Wm.wm_geometry(window, f"+{x}+{max(0, limit - title - height)}")
+    except tk.TclError:
+        pass                                                # the window is already gone
+
+
 def set_window_icon(window):
     """CTk replaces the icon shortly after a window is created, so set it now and again later."""
     def apply():

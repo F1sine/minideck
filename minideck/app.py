@@ -17,7 +17,7 @@ from .netutil import format_id, local_addresses, normalize_id
 from .proto import AuthError, human_fingerprint, identity_of
 from .serverapi import ServerAgent, parse_enroll_code
 from .ui import (CARD, FIELD, GHOST, GREEN, GREY, MUTED, ORANGE, PAGE, RED, describe_error,
-                 raise_window, set_window_icon)
+                 keep_on_screen, raise_window, set_window_icon)
 from .viewer import ViewerSession, ViewerWindow
 
 MAX_CLIPBOARD = 1_000_000
@@ -838,26 +838,23 @@ class App:
         ctk.CTkButton(row, text="Проверить сейчас", width=140, height=30,
                       command=lambda: self._check_updates(manual=True), **GHOST).pack(side="right")
 
+        # kept to two rows: this dialog already nearly fills a small or scaled screen
         ctk.CTkLabel(dialog, text="Отпечаток этого компьютера", font=self.f_head).pack(
             anchor="w", padx=24, pady=(8, 0))
-        ctk.CTkLabel(dialog, text="Назовите его тому, кто подключается, если его программа "
-                                  "предупредила, что ключ изменился.",
-                     text_color=MUTED, font=self.f_small, wraplength=360,
-                     justify="left").pack(anchor="w", padx=24)
         ident_row = ctk.CTkFrame(dialog, fg_color="transparent")
-        ident_row.pack(fill="x", padx=24, pady=(6, 6))
+        ident_row.pack(fill="x", padx=24, pady=(4, 4))
         try:
             mine = human_fingerprint(identity_of(config.host_identity()))
         except OSError:
             mine = "не удалось прочитать ключ"
         ctk.CTkLabel(ident_row, text=mine, font=self.f_small).pack(side="left")
-        ctk.CTkButton(ident_row, text="Копировать", width=110, height=30,
+        ctk.CTkButton(ident_row, text="Копировать", width=100, height=28,
                       command=lambda: self._copy(mine.replace(" ", "")), **GHOST).pack(side="right")
         known = len(self.cfg.get("known_hosts") or {})
         if known:
-            ctk.CTkButton(dialog, text=f"Забыть запомненные ключи ({known})", height=30,
+            ctk.CTkButton(dialog, text=f"Забыть ключи других компьютеров ({known})", height=26,
                           command=lambda: self._forget_identities(dialog), **GHOST).pack(
-                anchor="w", padx=24, pady=(0, 6))
+                anchor="w", padx=24, pady=(0, 4))
 
         error = ctk.CTkLabel(dialog, text="", text_color=RED, font=self.f_small)
         error.pack(anchor="w", padx=24)
@@ -896,7 +893,7 @@ class App:
                       text_color=("#1f2937", "#e5e7eb"), hover_color=("#e8ecf1", "#3a3c42"),
                       command=cancel).pack(side="right", padx=(0, 8))
         dialog.protocol("WM_DELETE_WINDOW", cancel)
-        dialog.after(150, lambda: (dialog.lift(), dialog.focus_force()))
+        dialog.after(150, lambda: (dialog.lift(), dialog.focus_force(), keep_on_screen(dialog)))
 
     # -- updates --------------------------------------------------------------
     def _note_version(self):
