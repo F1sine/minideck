@@ -11,14 +11,16 @@ from pathlib import Path
 from . import DEFAULT_PORT, DEFAULT_RELAY_PORT, VERSION
 from .journal import human_duration, human_size
 from .netutil import LineReader, connect_tcp, tune
-from .proto import AuthError, Msg, ProtocolError, handshake
+from .proto import AUTH_MAX_MESSAGE, MAX_MESSAGE, AuthError, Msg, ProtocolError, handshake
 from .screen import ScreenGrabber, changed_rects, encode_frame
 
 DEFAULT_FPS = 30
 
 DOWNLOAD_DIR = Path.home() / "Downloads" / "Minideck"
-MAX_FAILS = 5          # wrong passwords tolerated ...
-FAIL_WINDOW = 60.0     # ... within this many seconds
+MAX_FAILS = 5              # wrong passwords tolerated from one address ...
+FAIL_WINDOW = 60.0         # ... within this many seconds
+MAX_FILE = 2 * 1024 ** 3         # largest single file a viewer may send to this computer
+MAX_FILES_TOTAL = 8 * 1024 ** 3  # ... and the total one session may write
 
 
 class HostSession:
@@ -32,6 +34,7 @@ class HostSession:
         self.account = account   # server account behind a brokered session, else None
         self.kicked = False      # ended by the person at this computer
         self._file_size = 0
+        self._files_total = 0    # bytes written by this session, against MAX_FILES_TOTAL
         self.running = True
         self.quality = 60
         self.scale = 1.0
@@ -123,9 +126,31 @@ class HostSession:
         while path.exists():
             path = DOWNLOAD_DIR / f"{stem} ({n}){suffix}"
             n += 1
+        if self._files_total >= MAX_FILES_TOTAL:
+            self._refuse_file(path.name, "сеанс исчерпал лимит на передачу файлов")
+            return
         self._file = open(path, "wb")
         self._file_path = path
         self._file_size = 0
+
+    def _refuse_file(self, name, reason):
+        """Refuse a file instead of letting it fill the disk, and say so in the journal."""
+        self.host.log(f"file refused: {name} - {reason}")
+        self.host.event("file_refused", self, f"{name}: {reason}")
+
+    def _file_chunk(self, payload):
+        """Write one chunk, dropping the file once it outgrows a limit."""
+        if self._file is None:
+            return
+        size = self._file_size + len(payload)
+        if size > MAX_FILE or self._files_total + size > MAX_FILES_TOTAL:
+            name = self._file_path.name
+            self._file_close(False)
+            self._refuse_file(name, f"больше {human_size(MAX_FILE)}" if size > MAX_FILE
+                              else "сеанс исчерпал лимит на передачу файлов")
+            return
+        self._file.write(payload)
+        self._file_size = size
 
     def _file_close(self, complete):
         if self._file is None:
@@ -133,6 +158,7 @@ class HostSession:
         self._file.close()
         self._file = None
         if complete:
+            self._files_total += self._file_size
             self.host.log(f"file received: {self._file_path}")
             self.host.event("file_received", self, f"{self._file_path.name} ({human_size(self._file_size)})")
         else:
@@ -157,16 +183,15 @@ class HostSession:
                 elif mtype == Msg.REFRESH:
                     self.force_full = True
                 elif mtype == Msg.CLIPBOARD:
-                    if self.host.on_clipboard:
+                    # a view-only session never writes to this computer, the clipboard included
+                    if self.can_control and self.host.on_clipboard:
                         text = payload.decode("utf-8", "replace")
                         self.host.on_clipboard(text)
                         self.host.event("clipboard_received", self, f"{len(text)} симв.")
                 elif mtype == Msg.FILE_BEGIN:
                     self._file_begin(payload)
                 elif mtype == Msg.FILE_CHUNK:
-                    if self._file is not None:
-                        self._file.write(payload)
-                        self._file_size += len(payload)
+                    self._file_chunk(payload)
                 elif mtype == Msg.FILE_END:
                     self._file_close(True)
                 elif mtype == Msg.BYE:
@@ -203,7 +228,7 @@ class Host:
         self.sessions = []
         self.listen_error = None
         self._lock = threading.Lock()
-        self._fails = deque()
+        self._fails = {}         # address -> when it recently got the password wrong
         self._server = None
         self._injector = None
         self._injector_failed = False
@@ -282,12 +307,19 @@ class Host:
                 pass
 
     # -- one viewer ---------------------------------------------------------
-    def _locked_out(self):
+    def _locked_out(self, peer):
+        """True when this address has used up its attempts within the window.
+
+        Counted per address: someone hammering the port cannot shut everyone else out.
+        """
         now = time.monotonic()
         with self._lock:
-            while self._fails and now - self._fails[0] > FAIL_WINDOW:
-                self._fails.popleft()
-            return len(self._fails) >= MAX_FAILS
+            for address, fails in list(self._fails.items()):
+                while fails and now - fails[0] > FAIL_WINDOW:
+                    fails.popleft()
+                if not fails:
+                    del self._fails[address]
+            return len(self._fails.get(peer, ())) >= MAX_FAILS
 
     def handle_socket(self, sock, peer, password=None, control=True, label=None, account=None):
         """Authenticate a raw stream and run the session until it ends.
@@ -295,24 +327,26 @@ class Host:
         Sessions brokered by a management server pass a one-time password, the
         permission granted by the server and the server-verified account name.
         """
-        if self._locked_out():
+        if self._locked_out(peer):
             sock.close()
             return
         conn = None
         try:
             sock.settimeout(15)
             conn = handshake(sock, password or self.password, True)
+            conn.max_message = AUTH_MAX_MESSAGE
             try:
                 mtype, payload = conn.recv()
             except AuthError:
                 with self._lock:
-                    self._fails.append(time.monotonic())
+                    self._fails.setdefault(peer, deque()).append(time.monotonic())
                 self.log(f"wrong password from {peer}")
                 self.event("wrong_password", who=str(peer))
                 return
             if mtype != Msg.AUTH:
                 return
             name = label or str(json.loads(payload).get("name", "?"))[:64]
+            conn.max_message = MAX_MESSAGE   # frames and file chunks are big; the password is in
             sock.settimeout(None)
             if self.on_confirm and not self.on_confirm(peer, name):
                 conn.send_json(Msg.BYE, {"reason": "rejected"})

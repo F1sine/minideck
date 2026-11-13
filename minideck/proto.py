@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 MAGIC = b"MDK1"
 MAX_MESSAGE = 64 * 1024 * 1024
+AUTH_MAX_MESSAGE = 64 * 1024     # nothing big is expected before the password is accepted
 
 
 class Msg:
@@ -57,8 +58,9 @@ def recv_exact(sock, n):
 class Connection:
     """Encrypted message stream. send() is thread-safe; recv() is single-reader."""
 
-    def __init__(self, sock, send_key, recv_key):
+    def __init__(self, sock, send_key, recv_key, max_message=MAX_MESSAGE):
         self.sock = sock
+        self.max_message = max_message   # largest message accepted from the peer
         self._enc = ChaCha20Poly1305(send_key)
         self._dec = ChaCha20Poly1305(recv_key)
         self._send_ctr = 0
@@ -79,7 +81,7 @@ class Connection:
 
     def recv(self):
         (length,) = struct.unpack("<I", recv_exact(self.sock, 4))
-        if length < 17 or length > MAX_MESSAGE:
+        if length < 17 or length > self.max_message:
             raise ProtocolError("bad message length")
         ct = recv_exact(self.sock, length)
         nonce = struct.pack("<4xQ", self._recv_ctr)

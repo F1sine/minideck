@@ -27,6 +27,7 @@ ACTIONS = {
     "wrong_password": "неверный пароль",
     "kicked": "сеанс разорван с этого компьютера",
     "file_received": "получен файл",
+    "file_refused": "передача файла отклонена",
     "clipboard_received": "получен текст буфера обмена",
     "clipboard_sent": "отправлен текст буфера обмена",
     "setting_changed": "изменена настройка доступа",
