@@ -1,0 +1,6 @@
+cryptography>=42
+Pillow>=10
+numpy>=1.26
+mss>=9
+pynput>=1.7
+customtkinter>=5.2

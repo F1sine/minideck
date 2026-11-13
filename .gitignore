@@ -1,0 +1,21 @@
+# build output
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# local data that must never be published
+*.db
+*.sqlite
+*.key
+*.crt
+*.pem
+.minideck/
+.minideck-server/
+minideck-server.txt
+journal.jsonl

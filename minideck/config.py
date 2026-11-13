@@ -1,0 +1,60 @@
+"""Persistent settings in ~/.minideck/config.json."""
+import json
+import secrets
+from pathlib import Path
+
+from . import DEFAULT_PORT
+
+PATH = Path.home() / ".minideck" / "config.json"
+ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"  # no look-alike characters
+
+DEFAULTS = {
+    "port": DEFAULT_PORT,
+    "relay": "",
+    "id": "",
+    "id_key": "",
+    "password": "",          # only stored when "permanent password" is on
+    "permanent_password": False,
+    "allow_control": True,
+    "confirm": True,
+    "clipboard": True,
+    "theme": "system",
+    "server": {},            # management server this PC is enrolled in: {address, pin}
+    "pending_enroll": "",    # enrollment code left by the installer, used once on next start
+    "admin_server": {},      # last server the administrator console signed in to (no password)
+    "recent": [],            # addresses of past connections; never passwords
+}
+
+
+def new_password(length=10):
+    return "".join(secrets.choice(ALPHABET) for _ in range(length))
+
+
+def new_id():
+    return str(secrets.randbelow(900_000_000) + 100_000_000)
+
+
+def load():
+    cfg = dict(DEFAULTS)
+    try:
+        cfg.update(json.loads(PATH.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        pass
+    changed = False
+    if not cfg["id"]:
+        cfg["id"] = new_id()
+        changed = True
+    if not cfg["id_key"]:
+        cfg["id_key"] = secrets.token_hex(16)
+        changed = True
+    if changed:
+        save(cfg)
+    return cfg
+
+
+def save(cfg):
+    try:
+        PATH.parent.mkdir(parents=True, exist_ok=True)
+        PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
