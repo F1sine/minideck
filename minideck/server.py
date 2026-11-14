@@ -33,7 +33,10 @@ ROLES = ("admin", "operator", "viewer")
 PASSWORD_FILE = "ADMIN-PASSWORD.txt"   # first/reset admin password; removed once it is changed
 ID_RE = re.compile(r"\d{9}")
 NAME_RE = re.compile(r"[A-Za-z0-9_.-]{2,32}")
-MAX_FAILS, FAIL_WINDOW = 5, 60.0
+MAX_FAILS, FAIL_WINDOW = 5, 60.0            # wrong answers from one address ...
+ACCOUNT_FAILS, ACCOUNT_WINDOW = 10, 900.0   # wrong passwords for one account, from anywhere ...
+ACCOUNT_LOCK = 900.0                        # ... lock it for this long (in memory: a restart clears it)
+MAX_TRACKED = 10_000                        # entries kept per table, so guessing cannot fill memory
 
 
 def _scrypt(password, salt):
@@ -189,6 +192,8 @@ class Server:
         self.online = {}    # device id -> control StreamWriter
         self.tickets = {}   # token -> Ticket
         self.fails = {}     # ip -> deque of failure times
+        self.account_fails = {}   # account name -> deque of failure times, any address
+        self.locked = {}          # account name -> monotonic time the lock ends
 
     # -- helpers ------------------------------------------------------------
     @staticmethod
@@ -201,10 +206,42 @@ class Server:
         now = time.monotonic()
         while fails and now - fails[0] > FAIL_WINDOW:
             fails.popleft()
+        if fails is not None and not fails:
+            del self.fails[ip]                 # nothing recent left: forget the address
         return bool(fails) and len(fails) >= MAX_FAILS
 
     def _fail(self, ip):
         self.fails.setdefault(ip, deque()).append(time.monotonic())
+        _bound(self.fails, FAIL_WINDOW)
+
+    def _account_locked(self, name):
+        until = self.locked.get(name)
+        if until is None:
+            return False
+        if time.monotonic() < until:
+            return True
+        del self.locked[name]
+        return False
+
+    def _account_failed(self, name, ip):
+        """Count a wrong password against the account; lock it once guesses pile up from anywhere.
+
+        Counted for names that do not exist as well, so a lock says nothing about which do.
+        """
+        now = time.monotonic()
+        fails = self.account_fails.setdefault(name, deque())
+        fails.append(now)
+        while fails and now - fails[0] > ACCOUNT_WINDOW:
+            fails.popleft()
+        if len(fails) >= ACCOUNT_FAILS:
+            self.locked[name] = now + ACCOUNT_LOCK
+            del self.account_fails[name]
+            self.store.log(name[:32], "account_locked", "",
+                           f"{ACCOUNT_FAILS} неверных паролей за {int(ACCOUNT_WINDOW // 60)} мин, "
+                           f"последний с {ip}; вход закрыт на {int(ACCOUNT_LOCK // 60)} мин")
+            self.log(f"account {name[:32]!r} locked after repeated wrong passwords")
+        _bound(self.account_fails, ACCOUNT_WINDOW)
+        _bound(self.locked, None)
 
     @staticmethod
     def _allowed(user, device):
@@ -291,12 +328,19 @@ class Server:
         if self._blocked(ip):
             await self._send(writer, {"ok": False, "error": "too many attempts"})
             return
+        if self._account_locked(name):
+            # no password check at all while locked: guesses neither count nor cost scrypt time
+            self._fail(ip)
+            await self._send(writer, {"ok": False, "error": "too many attempts"})
+            return
         user = await asyncio.to_thread(self._verify, name, password)
         if user is None:
             self._fail(ip)
             self.store.log(name[:32], "login_failed", "", ip)
+            self._account_failed(name, ip)
             await self._send(writer, {"ok": False, "error": "bad credentials"})
             return
+        self.account_fails.pop(name, None)     # a correct password starts the count again
         self.store.log(name, "login", "", ip)
         await self._send(writer, {"ok": True, "user": name, "role": user["role"]})
         while True:
@@ -478,6 +522,26 @@ class Server:
             self.store.log(ticket.user, "session_end", target,
                            f"{ticket.device['name']}, {int(time.time() - started)} с")
             ticket.done.set()
+
+
+def _bound(table, window):
+    """Keep a tracking table from growing without end: drop what has expired, then the oldest."""
+    if len(table) <= MAX_TRACKED:
+        return
+    now = time.monotonic()
+    for key, value in list(table.items()):
+        if window is None:
+            if value <= now:                   # a lock that has ended
+                del table[key]
+        else:
+            while value and now - value[0] > window:
+                value.popleft()
+            if not value:
+                del table[key]
+    if len(table) > MAX_TRACKED:
+        last = lambda item: item[1] if window is None else item[1][-1]
+        for key, _ in sorted(table.items(), key=last)[:len(table) - MAX_TRACKED]:
+            del table[key]
 
 
 def default_data_dir():

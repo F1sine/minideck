@@ -46,6 +46,7 @@ ACTIONS = {
     # server side
     "login": "вход на сервер",
     "login_failed": "неудачный вход на сервер",
+    "account_locked": "учётная запись временно заблокирована",
     "connect_denied": "отказано в подключении",
     "device_enrolled": "компьютер зарегистрирован",
     "device_updated": "компьютер изменён",
