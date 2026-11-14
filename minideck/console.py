@@ -8,7 +8,8 @@ from . import DEFAULT_SERVER_PORT, config
 from .journalui import JournalView
 from .netutil import format_id
 from .proto import human_fingerprint
-from .serverapi import AdminClient, CertificateMismatch, make_enroll_code
+from .serverapi import (AdminClient, CertificateMismatch, CertificateRejected, fetch_fingerprint,
+                        make_enroll_code, parse_server_address)
 from .ui import (CARD, FIELD, GHOST, GREEN, GREY, HOVER, MUTED, PAGE, RED, RED_HOVER, ROLE_NAMES,
                  describe_error, raise_window, set_window_icon)
 from .viewer import ViewerSession
@@ -49,6 +50,9 @@ class LoginDialog(ctk.CTkToplevel):
         ctk.CTkLabel(self, text="Вход для администраторов и операторов.", text_color=MUTED,
                      font=app.f_small).pack(anchor="w", padx=24, pady=(0, 10))
         self.server = self._field("Адрес сервера", f"server.example.com:{DEFAULT_SERVER_PORT}", saved.get("address", ""))
+        ctk.CTkLabel(self, text="Можно вставить код регистрации или «адрес#отпечаток» — тогда сертификат "
+                                "проверится без вопросов.", text_color=MUTED, font=app.f_small,
+                     wraplength=320, justify="left").pack(anchor="w", padx=24, pady=(0, 8))
         self.user = self._field("Логин", "admin", saved.get("user", ""))
         self.password = self._field("Пароль", "", "", show="•")
         self.trust = ctk.CTkCheckBox(self, text="Доверять новому сертификату сервера")
@@ -76,19 +80,37 @@ class LoginDialog(ctk.CTkToplevel):
         if isinstance(exc, CertificateMismatch):
             self.trust.pack(anchor="w", padx=24, pady=(6, 0), before=self.button)
 
+    def _say(self, text):
+        self.error.configure(text=text)
+        self.error.pack(anchor="w", padx=24, before=self.button)
+
     def _login(self):
-        server, user, password = self.server.get().strip(), self.user.get().strip(), self.password.get()
+        user, password = self.user.get().strip(), self.password.get()
+        try:
+            server, given = parse_server_address(self.server.get())
+        except ValueError:
+            self._say("Отпечаток после «#» должен состоять из 64 шестнадцатеричных символов.")
+            return
         if not server or not user or not password:
-            self.error.configure(text="Заполните адрес, логин и пароль.")
-            self.error.pack(anchor="w", padx=24, before=self.button)
+            self._say("Заполните адрес, логин и пароль.")
             return
         saved = self.app.cfg.get("admin_server") or {}
-        pin = saved.get("pin") if saved.get("address") == server and not self.trust.get() else None
-        client = AdminClient(server, pin)
+        known = saved.get("pin") if saved.get("address") == server else None
+        # a fingerprint typed in wins; the remembered one stands unless the admin asked to replace it
+        pin = given or (None if self.trust.get() else known)
         self.button.configure(state="disabled", text="Вход…")
+        self.error.pack_forget()          # last attempt's message would read as this one's
 
         def work():
             try:
+                checked = pin
+                if not checked:
+                    # read the certificate first and let a person compare it; only then the password
+                    seen = fetch_fingerprint(server)
+                    if not self._confirm(server, seen, known):
+                        raise CertificateRejected(seen)
+                    checked = seen
+                client = AdminClient(server, checked)
                 client.login(user, password)
             except Exception as exc:
                 self.app.call_ui(self._fail, exc)
@@ -97,10 +119,57 @@ class LoginDialog(ctk.CTkToplevel):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _confirm(self, server, seen, known):
+        """Called on the login thread: ask on the UI thread whether this certificate is the right one."""
+        done, answer = threading.Event(), [False]
+        self.app.call_ui(self._ask_certificate, server, seen, known, done, answer)
+        done.wait(300)
+        return answer[0]
+
+    def _ask_certificate(self, server, seen, known, done, answer):
+        dialog = ctk.CTkToplevel(self, fg_color=PAGE)
+        dialog.title("Сертификат сервера")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        set_window_icon(dialog)
+        title = "Сертификат сервера изменился" if known else "Проверьте сертификат сервера"
+        ctk.CTkLabel(dialog, text=title, font=self.app.f_title).pack(anchor="w", padx=24, pady=(20, 4))
+        ctk.CTkLabel(dialog, text=server, text_color=MUTED).pack(anchor="w", padx=24)
+        if known:
+            ctk.CTkLabel(dialog, text="Было:\n" + human_fingerprint(known), text_color=MUTED,
+                         font=self.app.f_small, justify="left").pack(anchor="w", padx=24, pady=(10, 0))
+        ctk.CTkLabel(dialog, text=("Сейчас:\n" if known else "") + human_fingerprint(seen),
+                     font=self.app.f_small, justify="left").pack(anchor="w", padx=24, pady=(10, 0))
+        ctk.CTkLabel(dialog, text=(
+            "Пароль ещё не отправлен. Сверьте отпечаток с тем, что сервер напечатал при запуске "
+            "(строка «Certificate: SHA-256») или записал в ADMIN-PASSWORD.txt; он же стоит в конце "
+            "кода регистрации после «#». Не совпадает — не входите: кто-то мог встать между вами "
+            "и сервером."), wraplength=380, justify="left").pack(anchor="w", padx=24, pady=(12, 0))
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(fill="x", padx=24, pady=20)
+        state = {"closed": False}
+
+        def finish(ok):
+            if state["closed"]:
+                return
+            state["closed"] = True
+            answer[0] = ok
+            done.set()
+            dialog.destroy()
+
+        ctk.CTkButton(buttons, text="Совпадает — войти", width=170, height=36,
+                      command=lambda: finish(True)).pack(side="right")
+        ctk.CTkButton(buttons, text="Отмена", width=110, height=36, command=lambda: finish(False),
+                      **GHOST).pack(side="right", padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+        dialog.after(100, lambda: (dialog.lift(), dialog.focus_force()))
+
     def _done(self, client):
         # first successful login pins the certificate for later logins
         self.app.cfg["admin_server"] = {"address": client.server, "user": client.user,
                                         "pin": client.fingerprint}
+        self.server.delete(0, "end")
+        self.server.insert(0, client.server)
         config.save(self.app.cfg)
         self.destroy()
         self.app.console = Console(self.app, client)

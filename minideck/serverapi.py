@@ -15,6 +15,7 @@ from . import DEFAULT_SERVER_PORT
 from .netutil import LineReader, parse_hostport, tune
 
 CODE_RE = re.compile(r"minideck://([^/\s]+)/([A-Za-z0-9_-]+)#([0-9a-fA-F]{64})")
+FINGERPRINT_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 
 class ServerError(Exception):
@@ -29,6 +30,10 @@ class CertificateMismatch(Exception):
     """The server's certificate is not the one that was pinned."""
 
 
+class CertificateRejected(Exception):
+    """The person did not confirm the server's certificate, so nothing was sent to it."""
+
+
 def parse_enroll_code(text):
     """'minideck://host:port/token#fingerprint' -> (address, token, fingerprint) or None."""
     match = CODE_RE.fullmatch((text or "").strip())
@@ -37,6 +42,32 @@ def parse_enroll_code(text):
 
 def make_enroll_code(address, token, fingerprint):
     return f"minideck://{address}/{token}#{fingerprint}"
+
+
+def parse_server_address(text):
+    """What an administrator may type to reach a server -> (address, fingerprint or None).
+
+    Accepts a plain 'host:port', 'host:port#<fingerprint>' or a whole enrollment code,
+    which carries the fingerprint too. Raises ValueError for a malformed fingerprint.
+    """
+    text = (text or "").strip()
+    code = parse_enroll_code(text)
+    if code:
+        return code[0], code[2]
+    address, _, fingerprint = text.partition("#")
+    fingerprint = fingerprint.replace(" ", "").replace(":", "")
+    if not fingerprint:
+        return address.strip(), None
+    if not FINGERPRINT_RE.fullmatch(fingerprint):
+        raise ValueError("bad fingerprint")
+    return address.strip(), fingerprint.lower()
+
+
+def fetch_fingerprint(server, timeout=10):
+    """The certificate a server presents, read without sending it anything."""
+    sock, fingerprint = tls_connect(server, None, timeout)
+    sock.close()
+    return fingerprint
 
 
 def tls_connect(server, pin=None, timeout=10):
@@ -113,6 +144,9 @@ class AdminClient:
         self._closed = False
 
     def login(self, user, password):
+        if not self.pin:
+            # a password must never reach a server whose certificate nobody has checked
+            raise CertificateRejected("no pinned certificate")
         sock, self.fingerprint = tls_connect(self.server, self.pin)
         sock.settimeout(30)
         self._channel = Channel(sock)

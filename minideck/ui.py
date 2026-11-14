@@ -4,7 +4,7 @@ import tkinter as tk
 
 from . import resource_path
 from .proto import AuthError, IdentityError, IdentityMismatch, ProtocolError, VersionMismatch
-from .serverapi import CertificateMismatch, ServerError
+from .serverapi import CertificateMismatch, CertificateRejected, ServerError
 
 MUTED = ("#5f6b7a", "#9aa4b2")
 CARD = ("#ffffff", "#2b2d31")
@@ -38,6 +38,8 @@ def describe_error(exc):
     text = str(exc)
     if isinstance(exc, ServerError):
         return SERVER_ERRORS.get(exc.code, f"Сервер отклонил запрос: {exc.code}")
+    if isinstance(exc, CertificateRejected):
+        return "Вход отменён: сертификат сервера не подтверждён, пароль не отправлялся."
     if isinstance(exc, CertificateMismatch):
         return "Сертификат сервера не совпадает с сохранённым. Если сервер переустанавливали — отметьте «Доверять новому сертификату»."
     if isinstance(exc, AuthError):

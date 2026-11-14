@@ -484,12 +484,15 @@ def default_data_dir():
     return Path(os.environ.get("MINIDECK_DATA") or Path.home() / ".minideck-server")
 
 
-def write_password_file(data, password):
-    """Keep the new admin password where a service or container operator can read it."""
+def write_password_file(data, password, fingerprint=""):
+    """Keep the new admin password where a service or container operator can read it,
+    together with the certificate fingerprint the console asks to compare on first login."""
     path = data / PASSWORD_FILE
     path.write_text(
         "Minideck server - administrator account\n"
-        f"login   : admin\npassword: {password}\n\n"
+        f"login   : admin\npassword: {password}\n"
+        + (f"certificate SHA-256: {fingerprint}\n" if fingerprint else "")
+        + "\nCompare the certificate with what the console shows on the first login.\n"
         "This file is deleted automatically when the admin password is changed.\n",
         encoding="utf-8")
     try:
@@ -510,7 +513,7 @@ def main(port=DEFAULT_SERVER_PORT, bind="0.0.0.0", data_dir=None, public=None, r
         password = new_password(14)
         store.save_user("admin", password, "admin", "*")
         store.log("-", "admin_password_reset" if reset_admin else "server_initialized")
-        path = write_password_file(data, password)
+        path = write_password_file(data, password, fingerprint)
         print("Administrator account:\n  login   : admin\n  password: " + password)
         print(f"  (also saved to {path} until the password is changed)")
     elif (data / PASSWORD_FILE).exists():
